@@ -1,0 +1,36 @@
+services:
+  app:
+    build: . # Build from the Dockerfile in the current directory
+    image: your_registry/your_app_name:latest # Tag and push to a registry for deployment
+    restart: always
+    environment:
+      DATABASE_URL: postgres://your_prod_user:your_prod_password@db:5432/your_prod_db # Connect to 'db' service name
+      RUST_LOG: info
+    ports:
+      - "80:8000" # Expose Axum app to public port 80 (or 443 with a proxy)
+    depends_on:
+      - db
+
+  db:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: your_prod_db
+      POSTGRES_USER: your_prod_user
+      POSTGRES_PASSWORD: your_prod_password # Use a strong, secret password here
+    volumes:
+      - prod_db_data:/var/lib/postgresql/data # Persist data on the host
+
+  # Optional: Add a reverse proxy (e.g., Nginx) if needed for SSL/load balancing
+  # nginx:
+  #   image: nginx:alpine
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
+  #   depends_on:
+  #     - app
+
+volumes:
+  prod_db_data:

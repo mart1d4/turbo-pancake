@@ -1,0 +1,5 @@
+ALTER TABLE guilds ADD COLUMN splash VARCHAR(255);
+ALTER TABLE guilds ADD COLUMN rules_channel_id BIGINT NULL REFERENCES channels(id) ON DELETE SET NULL;
+ALTER TABLE guilds ADD COLUMN verification_level INT NOT NULL DEFAULT 0;
+ALTER TABLE guilds ADD COLUMN mfa_enabled BOOLEAN DEFAULT FALSE;
+ALTER TABLE guilds RENAME COLUMN vanity_url TO vanity_url_code;
