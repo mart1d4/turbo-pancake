@@ -20,7 +20,7 @@ pub struct RefreshTokenPayload {
 }
 
 // --- Response Bodies ---
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AuthResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -29,7 +29,7 @@ pub struct AuthResponse {
     pub user: PublicUser,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RefreshResponse {
     pub access_token: String,
     pub refresh_token: String,

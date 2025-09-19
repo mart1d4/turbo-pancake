@@ -24,3 +24,8 @@ thiserror = "2.0.16"
 once_cell = "1.21.3"
 headers = "0.4.1"
 uuid = { version = "1.18.1", features = ["v4"] }
+
+
+[lib]
+name = "turbo"
+path = "src/lib.rs"

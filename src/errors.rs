@@ -4,8 +4,21 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ErrorDetails {
+    pub code: i64,
+    pub message: String,
+    pub details: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ResponseError {
+    pub error: ErrorDetails,
+}
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -39,7 +52,7 @@ impl IntoResponse for AppError {
             // --- Application-specific Error Mappings ---
             AppError::WrongCredentials => (
                 StatusCode::UNAUTHORIZED,
-                "Wrong credentials provided.",
+                "Username or password is incorrect.",
                 self.to_string(),
             ),
             AppError::TokenCreation => (
@@ -54,13 +67,13 @@ impl IntoResponse for AppError {
             ),
             AppError::UserAlreadyExists => (
                 StatusCode::CONFLICT,
-                "User with this email or username already exists.",
+                "User with this username already exists.",
                 self.to_string(),
             ),
             AppError::DatabaseError(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "A database error occurred.",
-                format!("Database error: {}", e), // Detailed internal error
+                format!("Database error: {}", e),
             ),
             AppError::ExpiredToken => (
                 StatusCode::UNAUTHORIZED,
@@ -94,7 +107,7 @@ impl IntoResponse for AppError {
                     StatusCode::BAD_REQUEST,
                     "Invalid JSON request.",
                     e.to_string(),
-                ), // Catch-all for other JsonRejection types
+                ),
             },
             AppError::QueryRejection(e) => (
                 StatusCode::BAD_REQUEST,
