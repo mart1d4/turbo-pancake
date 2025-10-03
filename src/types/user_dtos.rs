@@ -1,9 +1,11 @@
 use crate::models::user::{User, UserStatus};
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sqlx::types::Json;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicUser {
+    #[serde(with = "serde_str")]
     pub id: i64,
     pub username: String,
     pub display_name: String,
@@ -17,7 +19,7 @@ pub struct PublicUser {
     pub email: Option<String>,
     pub phone: Option<String>,
     pub system: bool,
-    pub created_at: DateTime<chrono::Utc>,
+    pub created_at: DateTime<Utc>,
 }
 
 impl From<User> for PublicUser {
@@ -41,7 +43,13 @@ impl From<User> for PublicUser {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TwoFactorRecoveryCode {
+    pub code: String,
+    pub used: bool,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct LoginUser {
     pub id: i64,
     pub username: String,
@@ -54,10 +62,12 @@ pub struct LoginUser {
     pub banner_color: i32,
     pub accent_color: Option<i32>,
     pub password_hash: String,
+    pub two_factor_secret: Option<String>,
+    pub two_factor_recovery_codes: Option<Json<Vec<TwoFactorRecoveryCode>>>,
     pub email: Option<String>,
     pub phone: Option<String>,
     pub system: bool,
-    pub created_at: DateTime<chrono::Utc>,
+    pub created_at: DateTime<Utc>,
     pub is_deleted: bool,
 }
 
@@ -80,4 +90,16 @@ impl From<LoginUser> for PublicUser {
             created_at: user.created_at,
         }
     }
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SetupTwoFactorUser {
+    pub password_hash: String,
+    pub two_factor_secret: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ConfirmTwoFactorUser {
+    pub two_factor_secret: Option<String>,
+    pub two_factor_temp_secret: Option<String>,
 }

@@ -1,22 +1,24 @@
 mod auth;
 mod errors;
+mod extractors;
 mod handlers;
 mod models;
 mod state;
 mod types;
 
 use axum::{
-    Router,
+    Json, Router,
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
+use serde_json::json;
 use sqlx::PgPool;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
     handlers::{
-        auth::{login, refresh_token, register},
+        auth::{check_2fa, confirm_two_factor, login, refresh_token, register, setup_two_factor},
         protected::protected_route,
     },
     state::AppState,
@@ -43,17 +45,22 @@ async fn main() {
     let app_state = AppState { db: pool };
 
     let app = Router::new()
-        .route("/register", post(register))
-        .route("/login", post(login))
-        .route("/refresh-token", post(refresh_token))
+        .route("/auth/register", post(register))
+        .route("/auth/login", post(login))
+        .route("/auth/login/2fa", post(check_2fa))
+        .route("/auth/2fa/setup", post(setup_two_factor))
+        .route("/auth/2fa/confirm", post(confirm_two_factor))
+        //.route("/auth/2fa", delete())
+        .route("/auth/refresh", post(refresh_token))
         .route("/protected", get(protected_route))
         .with_state(app_state)
         .fallback(handler_404);
 
     let port = std::env::var("PORT")
-        .unwrap_or_else(|_| "3000".to_string())
+        .unwrap_or_else(|_| "8080".to_string())
         .parse::<u16>()
         .expect("PORT must be a valid number");
+
     let addr = format!("0.0.0.0:{}", port);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     tracing::debug!("listening on {}", listener.local_addr().unwrap());
@@ -61,5 +68,13 @@ async fn main() {
 }
 
 async fn handler_404() -> impl IntoResponse {
-    (StatusCode::NOT_FOUND, "nothing to see here")
+    let body = Json(json!({
+        "error": {
+            "code": 404,
+            "message": "Nothing found",
+            "details": "Nothing found",
+        }
+    }));
+
+    (StatusCode::NOT_FOUND, body)
 }
