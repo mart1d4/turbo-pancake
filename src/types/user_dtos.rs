@@ -50,6 +50,23 @@ pub struct TwoFactorRecoveryCode {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
+pub struct VerifyPasswordUser {
+    pub password_hash: String,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Disable2FAUser {
+    pub password_hash: String,
+    pub two_factor_secret: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ModifyEmailUser {
+    pub email: Option<String>,
+    pub email_verification_code: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct LoginUser {
     pub id: i64,
     pub username: String,

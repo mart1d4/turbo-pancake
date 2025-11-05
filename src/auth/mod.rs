@@ -1,8 +1,10 @@
+pub mod emails;
 pub mod jwt;
 pub mod recovery_codes;
 pub mod snowflake;
 pub mod types;
 
+pub use emails::issue_email_verification_token;
 pub use jwt::{
     ACCESS_TOKEN_EXPIRATION_SECONDS, AccessTokenClaims, KEYS, REFRESH_TOKEN_EXPIRATION_DAYS,
 };

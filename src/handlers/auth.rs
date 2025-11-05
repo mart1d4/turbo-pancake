@@ -8,31 +8,39 @@ use axum::{
     http::HeaderMap,
 };
 use axum_extra::TypedHeader;
-use axum_macros::debug_handler;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use headers::{Authorization, HeaderMapExt, UserAgent, authorization::Bearer};
+use rand::{Rng, distr::Alphanumeric, rng};
+use resend_rs::{Resend, types::CreateEmailBaseOptions};
 use sha1::{Digest, Sha1};
 use sqlx::{PgPool, types::Json as SqlxJson};
 use totp_rs::{Algorithm, Secret, TOTP};
-use turbo::auth::{generate_recovery_code_structs, types::ConfirmTwoFactorPayload};
 use uuid::Uuid;
 use zxcvbn::{Score, zxcvbn};
 
 use crate::{
     auth::{
         ACCESS_TOKEN_EXPIRATION_SECONDS, AccessTokenClaims, AuthResponse, KEYS, LoginPayload,
-        REFRESH_TOKEN_EXPIRATION_DAYS, RegisterPayload, generate_id,
+        REFRESH_TOKEN_EXPIRATION_DAYS, RegisterPayload,
+        emails::decode_email_verification_token,
+        generate_id, generate_recovery_code_structs, issue_email_verification_token,
         jwt::AuthorizedUser,
         types::{
-            ConfirmTwoFactorResponse, LoginResponse, SetupTwoFactorPayload, SetupTwoFactorResponse,
-            TwoFactorLoginMethod, TwoFactorLoginPayload,
+            ConfirmEmailPayload, ConfirmTwoFactorPayload, ConfirmTwoFactorResponse,
+            Disable2FAPayload, LoginResponse, ModifyEmailPayload, SetupTwoFactorPayload,
+            SetupTwoFactorResponse, TwoFactorLoginMethod, TwoFactorLoginPayload,
+            VerifyPasswordPayload,
         },
     },
     errors::{AppError, Resource},
     extractors::ValidatedJson,
+    state::AppState,
     types::{
         LoginUser, PublicUser, RefreshTokenSelect, TwoFactorRecoveryCode,
-        user_dtos::{ConfirmTwoFactorUser, SetupTwoFactorUser},
+        user_dtos::{
+            ConfirmTwoFactorUser, Disable2FAUser, ModifyEmailUser, SetupTwoFactorUser,
+            VerifyPasswordUser,
+        },
     },
 };
 
@@ -481,8 +489,6 @@ pub async fn setup_two_factor(
         user.username,
     )?;
 
-    println!("TOTP Secret: {:?}", totp.secret);
-
     sqlx::query!(
         r#"
             UPDATE users
@@ -524,11 +530,9 @@ pub async fn confirm_two_factor(
         sqlx::query!(
             r#"
                 UPDATE users
-                SET two_factor_temp_secret = $1, two_factor_temp_expires = $2
-                WHERE id = $3
+                SET two_factor_temp_secret = NULL, two_factor_temp_expires = NULL
+                WHERE id = $1
             "#,
-            None as Option<String>,
-            None as Option<DateTime<Utc>>,
             user.id,
         )
         .execute(&pool)
@@ -560,12 +564,11 @@ pub async fn confirm_two_factor(
     sqlx::query!(
         r#"
             UPDATE users
-            SET two_factor_secret = $1, two_factor_temp_secret = $2, two_factor_temp_expires = $3, two_factor_recovery_codes = $4
-            WHERE id = $5
+            SET two_factor_secret = $1, two_factor_temp_secret = NULL,
+                two_factor_temp_expires = NULL, two_factor_recovery_codes = $2
+            WHERE id = $3
         "#,
         user_auth.two_factor_temp_secret,
-        None as Option<String>,
-        None as Option<DateTime<Utc>>,
         SqlxJson(codes.clone()) as _,
         user.id,
     )
@@ -575,4 +578,240 @@ pub async fn confirm_two_factor(
     Ok(Json(ConfirmTwoFactorResponse {
         codes: codes.into_iter().map(|rc| rc.code).collect(),
     }))
+}
+
+pub async fn verify_password(
+    State(pool): State<PgPool>,
+    user: AuthorizedUser,
+    ValidatedJson(payload): ValidatedJson<VerifyPasswordPayload>,
+) -> Result<(), AppError> {
+    let user_auth = sqlx::query_as!(
+        VerifyPasswordUser,
+        r#"SELECT password_hash FROM users WHERE id = $1"#,
+        user.id
+    )
+    .fetch_optional(&pool)
+    .await?
+    .ok_or(AppError::InvalidToken)?;
+
+    let parsed_hash = PasswordHash::new(&user_auth.password_hash)?;
+    let passwords_match =
+        Argon2::default().verify_password(&payload.password.as_bytes(), &parsed_hash);
+
+    if !passwords_match.is_ok() {
+        return Err(AppError::WrongCredentials);
+    }
+
+    Ok(())
+}
+
+pub async fn disable_2fa(
+    State(pool): State<PgPool>,
+    user: AuthorizedUser,
+    ValidatedJson(payload): ValidatedJson<Disable2FAPayload>,
+) -> Result<(), AppError> {
+    let user_auth = sqlx::query_as!(
+        Disable2FAUser,
+        r#"
+            SELECT password_hash, two_factor_secret
+            FROM users
+            WHERE id = $1
+        "#,
+        user.id
+    )
+    .fetch_optional(&pool)
+    .await?
+    .ok_or(AppError::InvalidToken)?;
+
+    let parsed_hash = PasswordHash::new(&user_auth.password_hash)?;
+    let passwords_match =
+        Argon2::default().verify_password(&payload.password.as_bytes(), &parsed_hash);
+
+    if !passwords_match.is_ok() {
+        return Err(AppError::WrongCredentials);
+    }
+
+    if let Some(secret) = user_auth.two_factor_secret {
+        let secret = Secret::Encoded(secret);
+
+        let totp = TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret.to_bytes().unwrap(),
+            Some("Turbo Pancake".to_string()),
+            user.username,
+        )?;
+
+        let matches = totp.check_current(&payload.code)?;
+
+        if !matches {
+            return Err(AppError::InvalidOrExpiredCode);
+        }
+
+        sqlx::query!(
+            r#"
+                UPDATE users
+                SET two_factor_secret = NULL, two_factor_temp_secret = NULL,
+                    two_factor_temp_expires = NULL, two_factor_recovery_codes = NULL
+                WHERE id = $1
+            "#,
+            user.id,
+        )
+        .execute(&pool)
+        .await?;
+    } else {
+        return Err(AppError::TwoFactorSecretNotFound);
+    }
+
+    Ok(())
+}
+
+pub fn generate_email_code() -> String {
+    let code: String = rng()
+        .sample_iter(&Alphanumeric)
+        .take(6)
+        .map(char::from)
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+
+    code
+}
+
+async fn send_email(
+    resend: &Resend,
+    to: Vec<&str>,
+    subject: &str,
+    html: &str,
+) -> Result<(), AppError> {
+    let from = "Turbo Pancake <noreply@updates.mart1d4.dev>";
+    let email = CreateEmailBaseOptions::new(from, to, subject).with_html(html);
+    resend.emails.send(email).await.map_err(|e| {
+        tracing::error!("Email send error: {:?}", e);
+        AppError::EmailSendingFailed
+    })?;
+    Ok(())
+}
+
+pub async fn modify_email(
+    State(state): State<AppState>,
+    user: AuthorizedUser,
+    ValidatedJson(payload): ValidatedJson<ModifyEmailPayload>,
+) -> Result<(), AppError> {
+    let db_user = sqlx::query_as!(
+        ModifyEmailUser,
+        r#"
+            SELECT email, email_verification_code
+            FROM users
+            WHERE id = $1
+        "#,
+        user.id
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::InvalidToken)?;
+
+    match (
+        &db_user.email,
+        &db_user.email_verification_code,
+        &payload.code,
+    ) {
+        // Verify existing code
+        (Some(_), Some(code), Some(provided)) if provided == code => {
+            sqlx::query!(
+                r#"UPDATE users SET email_verification_code = $1 WHERE id = $2"#,
+                None as Option<String>,
+                user.id,
+            )
+            .execute(&state.db)
+            .await?;
+
+            let token = issue_email_verification_token(user.id, payload.new_email.clone())
+                .map_err(|_| AppError::TokenCreation)?;
+
+            let content = format!(
+                "<strong>Hey {}, you need to verify this email in order to add it to your account!</strong><br/><a href=\"https://turbo.pancake.dev/email/verify?token={}\">Click this link!<a/>",
+                &user.username, token
+            );
+
+            send_email(
+                &state.resend,
+                vec![&payload.new_email],
+                "Confirm your new email",
+                &content,
+            )
+            .await?;
+        }
+
+        // Wrong or missing code
+        (Some(_), Some(_), _) => return Err(AppError::WrongEmailCode),
+
+        // Send new code for existing email
+        (Some(email), None, _) => {
+            let code = generate_email_code();
+
+            sqlx::query!(
+                r#"UPDATE users SET email_verification_code = $1 WHERE id = $2"#,
+                code,
+                user.id,
+            )
+            .execute(&state.db)
+            .await?;
+
+            let content = format!(
+                "<strong>Hey {}, you need to verify this email in order to change it!</strong><br/><strong>{}<strong/>",
+                &user.username, code
+            );
+
+            send_email(&state.resend, vec![email], "Verify your email", &content).await?;
+        }
+
+        // No email set yet
+        (None, _, _) => {
+            let token = issue_email_verification_token(user.id, payload.new_email.clone())
+                .map_err(|_| AppError::TokenCreation)?;
+
+            let content = format!(
+                "<strong>Hey {}, you need to verify this email in order to add it to your account!</strong><br/><a href=\"https://turbo.pancake.dev/email/verify?token={}\">Click this link!<a/>",
+                &user.username, token
+            );
+
+            send_email(
+                &state.resend,
+                vec![&payload.new_email],
+                "Confirm your new email",
+                &content,
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn confirm_email(
+    State(pool): State<PgPool>,
+    user: AuthorizedUser,
+    ValidatedJson(payload): ValidatedJson<ConfirmEmailPayload>,
+) -> Result<(), AppError> {
+    let claims = decode_email_verification_token(payload.token)?;
+
+    if claims.sub != user.id || claims.exp <= Utc::now().timestamp() as usize {
+        return Err(AppError::InvalidToken);
+    }
+
+    sqlx::query!(
+        r#"
+            UPDATE users
+            SET email = $1, email_verification_expires = NULL, email_verification_code = NULL
+            WHERE id = $2
+        "#,
+        claims.new_email,
+        user.id,
+    )
+    .execute(&pool)
+    .await?;
+
+    Ok(())
 }

@@ -10,15 +10,19 @@ use axum::{
     Json, Router,
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
+use resend_rs::Resend;
 use serde_json::json;
 use sqlx::PgPool;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
     handlers::{
-        auth::{check_2fa, confirm_two_factor, login, refresh_token, register, setup_two_factor},
+        auth::{
+            check_2fa, confirm_email, confirm_two_factor, disable_2fa, login, modify_email,
+            refresh_token, register, setup_two_factor, verify_password,
+        },
         protected::protected_route,
     },
     state::AppState,
@@ -37,21 +41,28 @@ async fn main() {
     dotenvy::dotenv().ok();
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    let resend_token = std::env::var("RESEND_TOKEN").expect("RESEND_TOKEN must be set");
 
     let pool = PgPool::connect(&database_url)
         .await
         .expect("Failed to create Postgres pool");
 
-    let app_state = AppState { db: pool };
+    let app_state = AppState {
+        db: pool,
+        resend: Resend::new(&resend_token),
+    };
 
     let app = Router::new()
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/auth/login/2fa", post(check_2fa))
+        .route("/auth/verify-password", post(verify_password))
+        .route("/auth/refresh", post(refresh_token))
         .route("/auth/2fa/setup", post(setup_two_factor))
         .route("/auth/2fa/confirm", post(confirm_two_factor))
-        //.route("/auth/2fa", delete())
-        .route("/auth/refresh", post(refresh_token))
+        .route("/auth/2fa/disable", delete(disable_2fa))
+        .route("/users/@me/email", patch(modify_email))
+        .route("/users/@me/email/verify", post(confirm_email))
         .route("/protected", get(protected_route))
         .with_state(app_state)
         .fallback(handler_404);

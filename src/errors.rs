@@ -6,6 +6,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use resend_rs::{Resend, types::ErrorKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
@@ -43,48 +44,56 @@ impl std::fmt::Display for Resource {
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("Wrong credentials")]
+    #[error("Wrong credentials were provided.")]
     WrongCredentials,
-    #[error("Token creation error")]
+    #[error("Wrong email code provided.")]
+    WrongEmailCode,
+    #[error("User doesn't have any email set.")]
+    EmailNotSet,
+    #[error("User has an email set already.")]
+    EmailAlreadySet,
+    #[error("Token creation failed.")]
     TokenCreation,
-    #[error("Invalid access token")]
+    #[error("Invalid access token provided.")]
     InvalidToken,
-    #[error("Couldn't find resource: {0}")]
+    #[error("Couldn't find resource: {0}.")]
     ResourceNotFound(Resource),
-    #[error("User with this email or username already exists")]
+    #[error("User with this username already exists.")]
     UserAlreadyExists,
-    #[error("The provided password is too weak")]
+    #[error("The provided password is too weak.")]
     PasswordTooWeak,
-    #[error("Failed to fetch resource: {0}")]
+    #[error("Failed to fetch URL: {0}.")]
     FetchingError(#[from] reqwest::Error),
-    #[error("Database error: {0}")]
+    #[error("Database error: {0}.")]
     DatabaseError(#[from] sqlx::Error),
-    #[error("Expired token")]
+    #[error("Expired token provided.")]
     ExpiredToken,
-    #[error("Password hashing failed")]
+    #[error("Password hashing failed.")]
     PasswordHashingFailed(#[from] argon2::password_hash::Error),
-    #[error("Invalid JSON body: {0}")]
+    #[error("Invalid JSON body: {0}.")]
     JsonRejection(#[from] JsonRejection),
-    #[error("Invalid query parameters: {0}")]
+    #[error("Invalid query parameters: {0}.")]
     QueryRejection(#[from] QueryRejection),
-    #[error("Invalid path parameters: {0}")]
+    #[error("Invalid path parameters: {0}.")]
     PathRejection(#[from] PathRejection),
-    #[error("Body bytes extraction error: {0}")]
+    #[error("Body bytes extraction error: {0}.")]
     BytesRejection(#[from] BytesRejection),
-    #[error("Invalid JSON body: {0}")]
+    #[error("Invalid JSON body: {0}.")]
     InvalidJson(#[from] ValidationErrors),
     #[error("Invalid or expired challenge ID provided.")]
     InvalidOrExpiredChallenge,
-    #[error("Invalid or expired code provided.")]
+    #[error("Invalid or expired 2FA code provided.")]
     InvalidOrExpiredCode,
-    #[error("Invalid token provided.")]
+    #[error("Invalid 2FA token provided.")]
     InvalidTwoFactorToken(#[from] SystemTimeError),
-    #[error("TOTP URL Error")]
+    #[error("TOTP URL creation failed: {0}.")]
     TotpUrlError(#[from] TotpUrlError),
     #[error("2FA already activated on this account.")]
     TwoFactorEnabledAlready,
-    #[error("This user doesn't have a two factor secret set.")]
+    #[error("User doesn't have a two factor secret set.")]
     TwoFactorSecretNotFound,
+    #[error("Email sending failed.")]
+    EmailSendingFailed,
 }
 
 impl IntoResponse for AppError {
@@ -92,7 +101,27 @@ impl IntoResponse for AppError {
         let (status, client_message, internal_details) = match &self {
             AppError::WrongCredentials => (
                 StatusCode::UNAUTHORIZED,
-                "Username or password is incorrect.",
+                "Identifier or password is incorrect.",
+                self.to_string(),
+            ),
+            AppError::WrongEmailCode => (
+                StatusCode::UNAUTHORIZED,
+                "The code you provided is incorrect.",
+                self.to_string(),
+            ),
+            AppError::EmailNotSet => (
+                StatusCode::BAD_REQUEST,
+                "This user does not have an email.",
+                self.to_string(),
+            ),
+            AppError::EmailAlreadySet => (
+                StatusCode::BAD_REQUEST,
+                "This user has an email already.",
+                self.to_string(),
+            ),
+            AppError::EmailSendingFailed => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Something went wrong. Please try again later.",
                 self.to_string(),
             ),
             AppError::TokenCreation => (
@@ -112,7 +141,7 @@ impl IntoResponse for AppError {
             ),
             AppError::DatabaseError(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "A database error occurred.",
+                "Something went wrong. Please try again later.",
                 format!("Database error: {}", e),
             ),
             AppError::ExpiredToken => (
@@ -122,7 +151,7 @@ impl IntoResponse for AppError {
             ),
             AppError::FetchingError(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "A resource couldn't be fetched.",
+                "Something went wrong. Please try again later.",
                 format!("Reqwest error: {}", e),
             ),
             AppError::PasswordTooWeak => (
@@ -132,17 +161,19 @@ impl IntoResponse for AppError {
             ),
             AppError::PasswordHashingFailed(e) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Password processing failed.",
+                "Something went wrong. Please try again later.",
                 format!("Password hashing error: {}", e),
             ),
             AppError::ResourceNotFound(res) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Couldn't find the resource.",
+                StatusCode::NOT_FOUND,
+                "Resource not found.",
                 format!("Resource {} wasn't found.", res),
             ),
-            AppError::InvalidJson(e) => {
-                (StatusCode::BAD_REQUEST, "Invalid JSON body.", e.to_string())
-            }
+            AppError::InvalidJson(e) => (
+                StatusCode::BAD_REQUEST,
+                "Invalid form body.",
+                format!("Invalid body provided (validation): {}.", e),
+            ),
             AppError::InvalidOrExpiredChallenge => (
                 StatusCode::BAD_REQUEST,
                 "Invalid or expired challenge ID provided.",
@@ -154,18 +185,18 @@ impl IntoResponse for AppError {
                 self.to_string(),
             ),
             AppError::InvalidTwoFactorToken(e) => (
-                StatusCode::UNAUTHORIZED,
-                "Invalid two factor code provided",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Something went wrong. Please try again later.",
                 format!("Invalid two factor code provided: {}", e),
             ),
             AppError::TotpUrlError(e) => (
                 StatusCode::UNAUTHORIZED,
-                "Totp Url Error",
-                format!("Totp Url Error: {}", e),
+                "Something went wrong. Please try again later.",
+                format!("TOTP URL error: {}", e),
             ),
             AppError::TwoFactorEnabledAlready => (
                 StatusCode::BAD_REQUEST,
-                "Two factor is already enabled for this account.",
+                "You already have two factor authentication enabled.",
                 self.to_string(),
             ),
             AppError::TwoFactorSecretNotFound => (
